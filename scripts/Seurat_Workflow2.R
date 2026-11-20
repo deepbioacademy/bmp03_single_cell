@@ -1,0 +1,181 @@
+# Load packages
+library(tidyverse)
+library(Seurat)
+library(Matrix)
+library(patchwork)
+
+# Load the data
+sample_info <- read.csv("data/sample_info.csv")
+data_dirs <- file.path("data",
+                      "count_matrices",
+                      sample_info$SampleName,
+                      "outs",
+                      "filtered_feature_bc_matrix")
+
+names(data_dirs) <- gsub("_", "-", sample_info$SampleName)
+data_dirs <- data_dirs[1:3]
+
+# Sparse matrix
+sparse_matrix <- Read10X(data.dir = data_dirs)
+sparse_matrix[c("PECAM1", "CD8A", "TSPAN1"), 1:30]
+
+
+# CreateSeuratObject
+seu <- CreateSeuratObject(counts = sparse_matrix,
+                                  project = "pbmmc",
+                                  min.cells = 3,
+                                  min.features = 100)
+seu
+
+# Syntax
+# seurat_object <- Seurat::function(seurat_object)
+head(seu@meta.data)
+
+# Visualizing QC per cell and gene
+FeatureScatter(seu, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+VlnPlot(seu, features = c("nCount_RNA",
+                          "nFeature_RNA"))
+
+
+# mitochondrial genes
+seu <- PercentageFeatureSet(seu,
+                            pattern = "^MT-",
+                            col.name = "percent_mito")
+
+# ribosomal genes
+seu <- PercentageFeatureSet(seu,
+                            pattern = "^RP[SL]",
+                            col.name = "percent_ribo")
+
+
+# hemoglobin genes (but not HBP)
+seu <- PercentageFeatureSet(seu,
+                            pattern = "^HB[^(P)]",
+                            col.name = "percent_globin")
+
+head(seu@meta.data)
+
+# Visualize
+VlnPlot(seu, features = c("percent_mito",
+                          "percent_ribo",
+                          "percent_globin"))
+FeatureScatter(seu,
+               feature1 = "percent_globin",
+               feature2 = "percent_ribo")
+
+# Gene expression
+most_expressed_boxplot <- function(object, ngenes = 20){
+
+    # matrix of raw counts
+    cts <- Seurat::GetAssayData(object, assay = "RNA", layer = "counts")
+
+    # get percentage/cell
+    cts <- t(cts)/colSums(cts)*100
+    medians <- SparseArray::colMedians(cts)
+
+    # get top n genes
+    most_expressed <- order(medians, decreasing = T)[ngenes:1]
+    most_exp_matrix <- as.matrix((cts[,most_expressed]))
+
+    # prepare for plotting
+    most_exp_df <- stack(as.data.frame(most_exp_matrix))
+    colnames(most_exp_df) <- c("perc_total", "gene")
+
+    # boxplot with ggplot2
+    boxplot <- ggplot(most_exp_df, aes(x=gene, y=perc_total)) +
+        geom_boxplot() +
+        coord_flip()
+    return(boxplot)
+}
+
+most_expressed_boxplot(seu, 20)
+
+# Filtering
+seu <- subset(seu, subset = nFeature_RNA > 200 &
+                  nFeature_RNA < 5000 &
+                  percent_mito < 8)
+
+# Visualize after filtering
+VlnPlot(seu, features = c("nFeature_RNA",
+                          "percent_mito"))
+
+
+# Normalize the data
+seu <- NormalizeData(seu,
+              normalization.method = "LogNormalize",
+              scale.factor = 10000)
+
+# Inspect normalize data
+GetAssayData(seu)
+GetAssayData(seu, layer = "counts")
+
+# Variable features
+seu <- FindVariableFeatures(seu,
+                     selection.method = "vst",
+                     nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(seu), 10)
+top10
+
+# Plot highly variables
+vf_plot <- VariableFeaturePlot(seu)
+LabelPoints(vf_plot, points = top10, repel = TRUE)
+
+# Scaling the data
+seu <- ScaleData(seu)
+
+# Dimension reduction
+seu <- RunPCA(seu)
+DimPlot(seu, reduction = "pca")
+FeaturePlot(seu, reduction = "pca", features = "percent_globin")
+DimHeatmap(seu, dims = 1:12, cells = 500, balanced = TRUE)
+
+# Determine PCs
+ElbowPlot(seu, ndims = 40) +
+    geom_vline(xintercept = 25,
+               linetype = "dashed",
+               color = "red",
+               linewidth = 1)
+
+# UMAP
+seu <- RunUMAP(seu, dims = 1:25)
+DimPlot(seu, reduction = "umap")
+
+# Save the filtered data
+saveRDS(seu, "data/seu_before_integration.rds")
+
+# Data integration
+seu[["RNA"]] <- split(seu[["RNA"]], f = seu$orig.ident)
+seu <- IntegrateLayers(
+    object = seu,
+    method = CCAIntegration,
+    orig.reduction = "pca",
+    new.reduction = "integrated.cca",
+    verbose = FALSE
+)
+
+# re-join layers after integration
+seu[["RNA"]] <- JoinLayers(seu[["RNA"]])
+seu <- RunUMAP(seu, dims = 1:25,
+               n.components = 3, ,
+               reduction = "integrated.cca",
+               reduction.name = "umap")
+DimPlot(seu, reduction = "umap")
+
+# Cleaned-up code with proper checks
+seu <- FindNeighbors(seu, reduction = "integrated.cca", dims = 1:25)
+seu <- FindClusters(seu, resolution = 0.5)
+seu <- RunUMAP(seu, reduction = "integrated.cca", dims = 1:25,
+               reduction.name = "umap.cca")
+
+# 1. Mixing: shuffle so no sample hides another, then view each sample on its own
+DimPlot(seu, reduction = "umap.cca", group.by = "orig.ident", shuffle = TRUE)
+DimPlot(seu, reduction = "umap.cca", split.by = "orig.ident")
+
+# 2. Cell types still separate? Use known markers
+FeaturePlot(seu, reduction = "umap.cca",
+            features = c("CD3E", "MS4A1", "CD14", "HBB", "CD34", "NKG7"))
+
+# 3. Numbers: what fraction of each cluster comes from each sample?
+prop.table(table(seu$seurat_clusters, seu$orig.ident), margin = 1)
