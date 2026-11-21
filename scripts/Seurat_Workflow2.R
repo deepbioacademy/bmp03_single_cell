@@ -36,7 +36,6 @@ FeatureScatter(seu, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
 VlnPlot(seu, features = c("nCount_RNA",
                           "nFeature_RNA"))
 
-
 # mitochondrial genes
 seu <- PercentageFeatureSet(seu,
                             pattern = "^MT-",
@@ -98,6 +97,7 @@ seu <- subset(seu, subset = nFeature_RNA > 200 &
 # Visualize after filtering
 VlnPlot(seu, features = c("nFeature_RNA",
                           "percent_mito"))
+
 
 
 # Normalize the data
